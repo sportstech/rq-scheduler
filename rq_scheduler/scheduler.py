@@ -151,7 +151,7 @@ class Scheduler(object):
                               job.id)
         return job
 
-    def cron(self, cron_string, func, args=None, kwargs=None, repeat=None,
+    def cron(self, cron_string, func, args=None, kwargs=None, repeat=None, uniq=None,
              queue_name=None, id=None, timeout=None, description=None):
         """
         Schedule a cronjob
@@ -168,6 +168,8 @@ class Scheduler(object):
 
         if repeat is not None:
             job.meta['repeat'] = int(repeat)
+        if uniq is not None:
+            job.meta['uniq'] = bool(uniq)
 
         job.save()
 
