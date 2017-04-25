@@ -26,13 +26,16 @@ class Scheduler(object):
         self.queue_name = queue_name
         self._interval = interval
         self.log = logger
+        self._lock_acquired = False
 
     def register_birth(self):
         if self.connection.exists(self.scheduler_key) and \
                 not self.connection.hexists(self.scheduler_key, 'death'):
             raise ValueError("There's already an active RQ scheduler")
+
         key = self.scheduler_key
         now = time.time()
+
         with self.connection._pipeline() as p:
             p.delete(key)
             p.hset(key, 'birth', now)
@@ -49,6 +52,29 @@ class Scheduler(object):
             p.expire(self.scheduler_key, 60)
             p.execute()
 
+    def acquire_lock(self):
+        """
+        Acquire lock before scheduling jobs to prevent another scheduler
+        from scheduling jobs at the same time.
+
+        This function returns True if a lock is acquired. False otherwise.
+        """
+        key = '%s_lock' % self.scheduler_key
+        now = time.time()
+        expires = int(self._interval) + 10
+        self._lock_acquired = self.connection.set(
+                key, now, ex=expires, nx=True)
+        return self._lock_acquired
+
+    def remove_lock(self):
+        """
+        Remove acquired lock.
+        """
+        key = '%s_lock' % self.scheduler_key
+
+        if self._lock_acquired:
+            self.connection.delete(key)
+
     def _install_signal_handlers(self):
         """
         Installs signal handlers for handling SIGINT and SIGTERM
@@ -57,10 +83,12 @@ class Scheduler(object):
 
         def stop(signum, frame):
             """
-            Register scheduler's death and exit.
+            Register scheduler's death and exit
+            and remove previously acquired lock and exit.
             """
             self.log.info('Shutting down RQ scheduler...')
             self.register_death()
+            self.remove_lock()
             raise SystemExit()
 
         signal.signal(signal.SIGINT, stop)
@@ -102,8 +130,9 @@ class Scheduler(object):
         scheduler.enqueue_at(datetime(2020, 1, 1), func, 'argument', keyword='argument')
         """
         timeout = kwargs.pop('timeout', None)
+        job_id = kwargs.pop('job_id', None)
 
-        job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout)
+        job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout, id=job_id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(scheduled_time),
                               job.id)
@@ -116,8 +145,9 @@ class Scheduler(object):
         to datetime.utcnow().
         """
         timeout = kwargs.pop('timeout', None)
+        job_id = kwargs.pop('job_id', None)
 
-        job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout)
+        job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout, id=job_id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(datetime.utcnow() + time_delta),
                               job.id)
@@ -151,18 +181,22 @@ class Scheduler(object):
                               job.id)
         return job
 
-    def cron(self, cron_string, func, args=None, kwargs=None, repeat=None, uniq=None,
-             queue_name=None, id=None, timeout=None, description=None):
+    def cron(self, cron_string, func, args=None, kwargs=None,
+             repeat=None, uniq=None, result_ttl=None, ttl=None,
+             timeout=None, id=None, description=None, queue_name=None):
         """
         Schedule a cronjob
         """
         scheduled_time = get_next_scheduled_time(cron_string)
 
-        # Set result_ttl to -1, as jobs scheduled via cron are periodic ones.
+        # Set result_ttl to -1 if not specified, as jobs scheduled via cron are periodic ones.
         # Otherwise the job would expire after 500 sec.
+        if result_ttl is None:
+            result_ttl = -1
         job = self._create_job(func, args=args, kwargs=kwargs, commit=False,
-                               result_ttl=-1, id=id, queue_name=queue_name,
-                               description=description, timeout=timeout)
+                               result_ttl=result_ttl, ttl=ttl, id=id,
+                               description=description, queue_name=queue_name,
+                               timeout=timeout)
 
         job.meta['cron_string'] = cron_string
 
@@ -341,14 +375,25 @@ class Scheduler(object):
         lower than current time).
         """
         self.log.info('Running RQ scheduler...')
+
         self.register_birth()
         self._install_signal_handlers()
+
         try:
             while True:
-                self.enqueue_jobs()
-                if burst:
-                    self.log.info('RQ scheduler done, quitting')
-                    break
-                time.sleep(self._interval)
+
+                start_time = time.time()
+                if self.acquire_lock():
+                    self.enqueue_jobs()
+
+                    if burst:
+                        self.log.info('RQ scheduler done, quitting')
+                        break
+                else:
+                    self.log.info('Waiting for lock...')
+
+                # Time has already elapsed while enqueuing jobs, so don't wait too long.
+                time.sleep(self._interval - (time.time() - start_time))
         finally:
+            self.remove_lock()
             self.register_death()
