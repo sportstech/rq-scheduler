@@ -189,8 +189,10 @@ class Scheduler(object):
         """
         scheduled_time = get_next_scheduled_time(cron_string)
 
-        # Set result_ttl to -1, as jobs scheduled via cron are periodic ones.
+        # Set result_ttl to -1 if not specified, as jobs scheduled via cron are periodic ones.
         # Otherwise the job would expire after 500 sec.
+        if result_ttl is None:
+            result_ttl = -1
         job = self._create_job(func, args=args, kwargs=kwargs, commit=False,
                                result_ttl=result_ttl, ttl=ttl, id=id,
                                description=description, queue_name=queue_name,
