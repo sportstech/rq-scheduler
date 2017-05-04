@@ -20,15 +20,17 @@ class Scheduler(object):
     scheduler_key = 'rq:scheduler'
     scheduled_jobs_key = 'rq:scheduler:scheduled_jobs'
 
-    def __init__(self, queue_name='default', interval=60, connection=None):
+    def __init__(self, queue_name='default', interval=60, connection=None, skip_locking=False):
         from rq.connections import resolve_connection
         self.connection = resolve_connection(connection)
         self.queue_name = queue_name
         self._interval = interval
         self.log = logger
+        self.skip_locking = skip_locking
         self._lock_acquired = False
 
     def register_birth(self):
+        self.log.info('Registering birth')
         if self.connection.exists(self.scheduler_key) and \
                 not self.connection.hexists(self.scheduler_key, 'death'):
             raise ValueError("There's already an active RQ scheduler")
@@ -47,6 +49,7 @@ class Scheduler(object):
 
     def register_death(self):
         """Registers its own death."""
+        self.log.info('Registering death')
         with self.connection._pipeline() as p:
             p.hset(self.scheduler_key, 'death', time.time())
             p.expire(self.scheduler_key, 60)
@@ -59,6 +62,8 @@ class Scheduler(object):
 
         This function returns True if a lock is acquired. False otherwise.
         """
+        if self.skip_locking:
+            return True
         key = '%s_lock' % self.scheduler_key
         now = time.time()
         expires = int(self._interval) + 10
@@ -70,6 +75,8 @@ class Scheduler(object):
         """
         Remove acquired lock.
         """
+        if self.skip_locking:
+            return None
         key = '%s_lock' % self.scheduler_key
 
         if self._lock_acquired:
@@ -359,10 +366,11 @@ class Scheduler(object):
         """
         Move scheduled jobs into queues.
         """
-        self.log.info('Checking for scheduled jobs...')
+        self.log.debug('Checking for scheduled jobs')
 
         jobs = self.get_jobs_to_queue()
         for job in jobs:
+            self.log.info("enqueuing '%s'" % job)
             self.enqueue_job(job)
 
         # Refresh scheduler key's expiry
@@ -374,26 +382,32 @@ class Scheduler(object):
         Periodically check whether there's any job that should be put in the queue (score
         lower than current time).
         """
-        self.log.info('Running RQ scheduler...')
 
         self.register_birth()
         self._install_signal_handlers()
 
         try:
             while True:
+                self.log.debug("Entering run loop")
 
                 start_time = time.time()
                 if self.acquire_lock():
                     self.enqueue_jobs()
+                    self.remove_lock()
 
                     if burst:
                         self.log.info('RQ scheduler done, quitting')
                         break
                 else:
-                    self.log.info('Waiting for lock...')
+                    self.log.warning('Lock already taken - skipping run')
 
                 # Time has already elapsed while enqueuing jobs, so don't wait too long.
-                time.sleep(self._interval - (time.time() - start_time))
+                seconds_elapsed_since_start = time.time() - start_time
+                seconds_until_next_scheduled_run = self._interval - seconds_elapsed_since_start
+                # ensure we have a non-negative number
+                if seconds_until_next_scheduled_run > 0:
+                    self.log.debug("Sleeping %.2f seconds" % seconds_until_next_scheduled_run)
+                    time.sleep(seconds_until_next_scheduled_run)
         finally:
             self.remove_lock()
             self.register_death()

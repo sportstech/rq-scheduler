@@ -26,6 +26,7 @@ def main():
             queue (in seconds, can be floating-point for more precision).")
     parser.add_argument('--path', default='.', help='Specify the import path.')
     parser.add_argument('--pid', help='A filename to use for the PID file.', metavar='FILE')
+    parser.add_argument('-l', '--skiplocking', action='store_true', default=False, help='Skip redis based lock')
 
     args = parser.parse_args()
 
@@ -49,7 +50,7 @@ def main():
         level = 'INFO'
     setup_loghandlers(level)
 
-    scheduler = Scheduler(connection=connection, interval=args.interval)
+    scheduler = Scheduler(connection=connection, interval=args.interval, skip_locking=args.skiplocking)
     scheduler.run(burst=args.burst)
 
 if __name__ == '__main__':
