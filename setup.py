@@ -8,7 +8,7 @@ if platform.python_version() < '2.7':
 
 setup(
     name='rq-scheduler',
-    version='0.6.4',
+    version='0.6.5',
     author='Selwin Ong',
     author_email='selwin.ong@gmail.com',
     packages=['rq_scheduler'],
